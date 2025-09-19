@@ -213,15 +213,19 @@ func buildTelegramMessage(payload map[string]any, raw []byte) string {
 		builder.WriteString("`\n")
 	}
 
-	// Message from heartbeat or main message
+	// Message - prefer main msg, fallback to heartbeat.msg
 	heartbeatMsg := nestedString(payload, "heartbeat", "msg")
-	if heartbeatMsg != "" && heartbeatMsg != "N/A" {
+	var displayMsg string
+
+	if msg != "" {
+		displayMsg = msg
+	} else if heartbeatMsg != "" && heartbeatMsg != "N/A" {
+		displayMsg = heartbeatMsg
+	}
+
+	if displayMsg != "" {
 		builder.WriteString("💬 *消息*: ")
-		builder.WriteString(escapeMarkdown(heartbeatMsg))
-		builder.WriteByte('\n')
-	} else if msg != "" && !isTest {
-		builder.WriteString("💬 *消息*: ")
-		builder.WriteString(escapeMarkdown(msg))
+		builder.WriteString(escapeMarkdown(displayMsg))
 		builder.WriteByte('\n')
 	}
 
@@ -238,20 +242,6 @@ func buildTelegramMessage(payload map[string]any, raw []byte) string {
 	if timestamp != "" {
 		builder.WriteString("🕐 *时间*: `")
 		builder.WriteString(escapeMarkdown(timestamp))
-		builder.WriteString("`\n")
-	}
-
-	// Monitor type and timeout (for debugging)
-	monitorType := nestedString(payload, "monitor", "type")
-	timeout := nestedString(payload, "monitor", "timeout")
-	if monitorType != "" {
-		builder.WriteString("🔧 *类型*: `")
-		builder.WriteString(escapeMarkdown(monitorType))
-		if timeout != "" {
-			builder.WriteString(" \\(超时: ")
-			builder.WriteString(escapeMarkdown(timeout))
-			builder.WriteString("s\\)")
-		}
 		builder.WriteString("`\n")
 	}
 
