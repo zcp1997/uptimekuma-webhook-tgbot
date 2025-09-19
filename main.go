@@ -168,74 +168,91 @@ func buildTelegramMessage(payload map[string]any, raw []byte) string {
 	msg := stringFromMap(payload, "msg")
 	isTest := strings.Contains(strings.ToLower(msg), "testing") || strings.Contains(strings.ToLower(msg), "test")
 
-	// Header with title
+	// Get heartbeat status (0=Down, 1=Up)
+	heartbeatStatus := nestedString(payload, "heartbeat", "status")
+
+	// Header with title and status emoji
+	var statusEmoji string
+	var statusText string
+
 	if isTest {
 		builder.WriteString("🧪 *Uptime Kuma 测试通知*\n\n")
 	} else {
-		builder.WriteString("🔔 *Uptime Kuma 监控通知*\n\n")
+		switch heartbeatStatus {
+		case "0":
+			statusEmoji = "❌"
+			statusText = "DOWN"
+		case "1":
+			statusEmoji = "✅"
+			statusText = "UP"
+		default:
+			statusEmoji = "ℹ️"
+			statusText = "UNKNOWN"
+		}
+		builder.WriteString(fmt.Sprintf("%s *Uptime Kuma 监控通知* \\- *%s*\n\n", statusEmoji, statusText))
 	}
 
-	// Monitor name with icon
+	// Monitor name
 	monitorName := nestedString(payload, "monitor", "name")
 	if monitorName != "" {
-		builder.WriteString("📊 *监控名称*: `")
+		builder.WriteString("📊 *服务名称*: `")
 		builder.WriteString(escapeMarkdown(monitorName))
 		builder.WriteString("`\n")
 	}
 
-	// Status with appropriate emoji and formatting
-	status := stringFromMap(payload, "status")
-	if status != "" {
-		statusUpper := strings.ToUpper(status)
-		var statusEmoji string
-		switch strings.ToLower(status) {
-		case "up":
-			statusEmoji = "✅"
-		case "down":
-			statusEmoji = "❌"
-		case "maintenance":
-			statusEmoji = "🔧"
-		case "pending":
-			statusEmoji = "⏳"
-		default:
-			statusEmoji = "ℹ️"
+	// Host and Port
+	hostname := nestedString(payload, "monitor", "hostname")
+	port := nestedString(payload, "monitor", "port")
+	if hostname != "" {
+		builder.WriteString("🖥️ *主机*: `")
+		builder.WriteString(escapeMarkdown(hostname))
+		if port != "" && port != "0" {
+			builder.WriteString(":")
+			builder.WriteString(escapeMarkdown(port))
 		}
-		builder.WriteString(fmt.Sprintf("%s *状态*: *%s*\n", statusEmoji, escapeMarkdown(statusUpper)))
+		builder.WriteString("`\n")
 	}
 
-	// Reason/Message with appropriate formatting
-	reason := stringFromMap(payload, "incidentReason")
-	if reason == "" {
-		reason = msg
-	}
-	if reason != "" {
-		builder.WriteString("❗ *原因*: ")
-		builder.WriteString(escapeMarkdown(reason))
+	// Message from heartbeat or main message
+	heartbeatMsg := nestedString(payload, "heartbeat", "msg")
+	if heartbeatMsg != "" && heartbeatMsg != "N/A" {
+		builder.WriteString("💬 *消息*: ")
+		builder.WriteString(escapeMarkdown(heartbeatMsg))
+		builder.WriteByte('\n')
+	} else if msg != "" && !isTest {
+		builder.WriteString("💬 *消息*: ")
+		builder.WriteString(escapeMarkdown(msg))
 		builder.WriteByte('\n')
 	}
 
-	// URL with link icon
-	monitorURL := nestedString(payload, "monitor", "url")
-	if monitorURL != "" {
-		builder.WriteString("🔗 *监控地址*: ")
-		builder.WriteString(escapeMarkdown(monitorURL))
-		builder.WriteByte('\n')
+	// Ping/Response time
+	ping := nestedString(payload, "heartbeat", "ping")
+	if ping != "" {
+		builder.WriteString("⚡ *响应时间*: `")
+		builder.WriteString(escapeMarkdown(ping))
+		builder.WriteString(" ms`\n")
 	}
 
-	// Timestamp with clock icon
-	timestamp := stringFromMap(payload, "time")
+	// Timestamp from heartbeat
+	timestamp := nestedString(payload, "heartbeat", "localDateTime")
 	if timestamp != "" {
 		builder.WriteString("🕐 *时间*: `")
 		builder.WriteString(escapeMarkdown(timestamp))
 		builder.WriteString("`\n")
 	}
 
-	// Ping with speed icon
-	ping := stringFromMap(payload, "ping")
-	if ping != "" {
-		builder.WriteString("⚡ *响应时间*: `")
-		builder.WriteString(escapeMarkdown(ping))
-		builder.WriteString(" ms`\n")
+	// Monitor type and timeout (for debugging)
+	monitorType := nestedString(payload, "monitor", "type")
+	timeout := nestedString(payload, "monitor", "timeout")
+	if monitorType != "" {
+		builder.WriteString("🔧 *类型*: `")
+		builder.WriteString(escapeMarkdown(monitorType))
+		if timeout != "" {
+			builder.WriteString(" \\(超时: ")
+			builder.WriteString(escapeMarkdown(timeout))
+			builder.WriteString("s\\)")
+		}
+		builder.WriteString("`\n")
 	}
 
 	text := strings.TrimSpace(builder.String())
@@ -243,16 +260,13 @@ func buildTelegramMessage(payload map[string]any, raw []byte) string {
 		// Fallback for completely empty payload
 		builder.Reset()
 		builder.WriteString("📋 *Uptime Kuma 通知*\n\n")
-		builder.WriteString("📄 *原始数据*:\n```json\n")
-		builder.WriteString(fallbackRaw(raw))
-		builder.WriteString("\n```")
+		builder.WriteString(buildCompactRawData(raw))
 		return builder.String()
 	}
 
-	// Add raw data section
-	rawText := fallbackRaw(raw)
-	if rawText != "" {
-		text = text + "\n\n📄 *原始数据*:\n```json\n" + rawText + "\n```"
+	// Add compact raw data section for debugging (optional)
+	if isTest {
+		text = text + "\n\n" + buildCompactRawData(raw)
 	}
 
 	return text
@@ -268,6 +282,55 @@ func fallbackRaw(raw []byte) string {
 		return trimmed[:maxRaw] + "..."
 	}
 	return trimmed
+}
+
+// buildCompactRawData creates a compact version of raw data with only essential fields
+func buildCompactRawData(raw []byte) string {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "📄 *原始数据*:\n```\n" + fallbackRaw(raw) + "\n```"
+	}
+
+	// Create compact JSON with only essential fields
+	compact := map[string]any{}
+
+	// Add heartbeat info
+	if heartbeat, ok := payload["heartbeat"].(map[string]any); ok {
+		compactHeartbeat := map[string]any{}
+		for _, key := range []string{"status", "time", "msg", "ping", "duration"} {
+			if value, exists := heartbeat[key]; exists {
+				compactHeartbeat[key] = value
+			}
+		}
+		if len(compactHeartbeat) > 0 {
+			compact["heartbeat"] = compactHeartbeat
+		}
+	}
+
+	// Add monitor info
+	if monitor, ok := payload["monitor"].(map[string]any); ok {
+		compactMonitor := map[string]any{}
+		for _, key := range []string{"name", "hostname", "port", "type", "timeout"} {
+			if value, exists := monitor[key]; exists {
+				compactMonitor[key] = value
+			}
+		}
+		if len(compactMonitor) > 0 {
+			compact["monitor"] = compactMonitor
+		}
+	}
+
+	// Add main message
+	if msg, ok := payload["msg"]; ok {
+		compact["msg"] = msg
+	}
+
+	compactJSON, err := json.MarshalIndent(compact, "", "  ")
+	if err != nil {
+		return "📄 *原始数据*:\n```\n" + fallbackRaw(raw) + "\n```"
+	}
+
+	return "📄 *核心数据*:\n```json\n" + string(compactJSON) + "\n```"
 }
 
 // escapeMarkdown escapes special characters for Telegram MarkdownV2
