@@ -143,6 +143,8 @@ func webhookHandler(cfg config, client *telegramClient) http.HandlerFunc {
 			log.Printf("invalid JSON payload: %v", err)
 		}
 
+		log.Printf("body raw json: %v", string(body))
+
 		message := buildTelegramMessage(payload, body)
 		ctx, cancel := context.WithTimeout(r.Context(), client.requestTimeout)
 		defer cancel()
@@ -162,59 +164,95 @@ func webhookHandler(cfg config, client *telegramClient) http.HandlerFunc {
 func buildTelegramMessage(payload map[string]any, raw []byte) string {
 	var builder strings.Builder
 
+	// Check if this is a test message
+	msg := stringFromMap(payload, "msg")
+	isTest := strings.Contains(strings.ToLower(msg), "testing") || strings.Contains(strings.ToLower(msg), "test")
+
+	// Header with title
+	if isTest {
+		builder.WriteString("🧪 *Uptime Kuma 测试通知*\n\n")
+	} else {
+		builder.WriteString("🔔 *Uptime Kuma 监控通知*\n\n")
+	}
+
+	// Monitor name with icon
 	monitorName := nestedString(payload, "monitor", "name")
 	if monitorName != "" {
-		builder.WriteString("Monitor: ")
-		builder.WriteString(monitorName)
-		builder.WriteByte('\n')
+		builder.WriteString("📊 *监控名称*: `")
+		builder.WriteString(escapeMarkdown(monitorName))
+		builder.WriteString("`\n")
 	}
 
+	// Status with appropriate emoji and formatting
 	status := stringFromMap(payload, "status")
 	if status != "" {
-		builder.WriteString("Status: ")
-		builder.WriteString(strings.ToUpper(status))
-		builder.WriteByte('\n')
+		statusUpper := strings.ToUpper(status)
+		var statusEmoji string
+		switch strings.ToLower(status) {
+		case "up":
+			statusEmoji = "✅"
+		case "down":
+			statusEmoji = "❌"
+		case "maintenance":
+			statusEmoji = "🔧"
+		case "pending":
+			statusEmoji = "⏳"
+		default:
+			statusEmoji = "ℹ️"
+		}
+		builder.WriteString(fmt.Sprintf("%s *状态*: *%s*\n", statusEmoji, escapeMarkdown(statusUpper)))
 	}
 
+	// Reason/Message with appropriate formatting
 	reason := stringFromMap(payload, "incidentReason")
 	if reason == "" {
-		reason = stringFromMap(payload, "msg")
+		reason = msg
 	}
 	if reason != "" {
-		builder.WriteString("Reason: ")
-		builder.WriteString(reason)
+		builder.WriteString("❗ *原因*: ")
+		builder.WriteString(escapeMarkdown(reason))
 		builder.WriteByte('\n')
 	}
 
+	// URL with link icon
 	monitorURL := nestedString(payload, "monitor", "url")
 	if monitorURL != "" {
-		builder.WriteString("URL: ")
-		builder.WriteString(monitorURL)
+		builder.WriteString("🔗 *监控地址*: ")
+		builder.WriteString(escapeMarkdown(monitorURL))
 		builder.WriteByte('\n')
 	}
 
+	// Timestamp with clock icon
 	timestamp := stringFromMap(payload, "time")
 	if timestamp != "" {
-		builder.WriteString("Time: ")
-		builder.WriteString(timestamp)
-		builder.WriteByte('\n')
+		builder.WriteString("🕐 *时间*: `")
+		builder.WriteString(escapeMarkdown(timestamp))
+		builder.WriteString("`\n")
 	}
 
+	// Ping with speed icon
 	ping := stringFromMap(payload, "ping")
 	if ping != "" {
-		builder.WriteString("Ping: ")
-		builder.WriteString(ping)
-		builder.WriteByte('\n')
+		builder.WriteString("⚡ *响应时间*: `")
+		builder.WriteString(escapeMarkdown(ping))
+		builder.WriteString(" ms`\n")
 	}
 
 	text := strings.TrimSpace(builder.String())
 	if text == "" {
-		return fallbackRaw(raw)
+		// Fallback for completely empty payload
+		builder.Reset()
+		builder.WriteString("📋 *Uptime Kuma 通知*\n\n")
+		builder.WriteString("📄 *原始数据*:\n```json\n")
+		builder.WriteString(fallbackRaw(raw))
+		builder.WriteString("\n```")
+		return builder.String()
 	}
 
+	// Add raw data section
 	rawText := fallbackRaw(raw)
 	if rawText != "" {
-		text = text + "\n---\n" + rawText
+		text = text + "\n\n📄 *原始数据*:\n```json\n" + rawText + "\n```"
 	}
 
 	return text
@@ -230,6 +268,33 @@ func fallbackRaw(raw []byte) string {
 		return trimmed[:maxRaw] + "..."
 	}
 	return trimmed
+}
+
+// escapeMarkdown escapes special characters for Telegram MarkdownV2
+func escapeMarkdown(text string) string {
+	// For MarkdownV2, we need to escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+	// But we'll use a simpler approach and escape the most common problematic characters
+	replacer := strings.NewReplacer(
+		"*", "\\*",
+		"_", "\\_",
+		"`", "\\`",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(text)
 }
 
 func nestedString(payload map[string]any, keys ...string) string {
@@ -287,6 +352,7 @@ func (c *telegramClient) sendMessage(ctx context.Context, text string) error {
 	payload := map[string]any{
 		"chat_id":                  c.chatID,
 		"text":                     text,
+		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": true,
 	}
 
